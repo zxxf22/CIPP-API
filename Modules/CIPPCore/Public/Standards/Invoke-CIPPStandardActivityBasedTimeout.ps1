@@ -1,0 +1,45 @@
+function Invoke-CIPPStandardActivityBasedTimeout {
+    <#
+    .FUNCTIONALITY
+    Internal
+    #>
+    param($Tenant, $Settings)
+    $State = (New-GraphGetRequest -Uri 'https://graph.microsoft.com/beta/policies/activityBasedTimeoutPolicies' -tenantid $tenant).id
+
+    If ($Settings.remediate -eq $true) {
+        try {
+            if (!$State) {
+                $body = @'
+{
+  "displayName": "DefaultTimeoutPolicy",
+  "isOrganizationDefault": true,
+  "definition":["{\"ActivityBasedTimeoutPolicy\":{\"Version\":1,\"ApplicationPolicies\":[{\"ApplicationId\":\"default\",\"WebSessionIdleTimeout\":\"01:00:00\"}]}}"]
+}
+'@
+
+                New-GraphPostRequest -tenantid $tenant -Uri 'https://graph.microsoft.com/beta/policies/activityBasedTimeoutPolicies' -Type POST -Body $body -ContentType 'application/json'
+                Write-LogMessage -API 'Standards' -tenant $tenant -message 'Enabled Activity Based Timeout of one hour' -sev Info
+            } else {
+                Write-LogMessage -API 'Standards' -tenant $tenant -message 'Activity Based Timeout is already enabled' -sev Info
+            }
+        } catch {
+            $ErrorMessage = Get-NormalizedError -Message $_.Exception.Message
+            Write-LogMessage -API 'Standards' -tenant $tenant -message "Failed to enable Activity Based Timeout $ErrorMessage" -sev Error
+        }
+    }
+
+    if ($Settings.alert -eq $true) {
+
+        if ($State) {
+            Write-LogMessage -API 'Standards' -tenant $tenant -message 'Activity Based Timeout is enabled' -sev Info
+        } else {
+            Write-LogMessage -API 'Standards' -tenant $tenant -message 'Activity Based Timeout is not enabled' -sev Alert
+        }
+    }
+
+    if ($Settings.report -eq $true) {
+        Add-CIPPBPAField -FieldName 'ActivityBasedTimeout' -FieldValue $state -StoreAs bool -Tenant $tenant
+    }
+
+}
+
