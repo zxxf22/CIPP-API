@@ -117,8 +117,6 @@ function Test-CIPPAuditLogRules {
         $CacheWebhooksTable = Get-CippTable -TableName 'CacheWebhooks'
 
         $ExtendedPropertiesIgnoreList = @(
-            'OAuth2:Authorize'
-            'OAuth2:Token'
             'SAS:EndAuth'
             'SAS:ProcessAuth'
             'deviceAuth:ReprocessTls'
@@ -186,6 +184,9 @@ function Test-CIPPAuditLogRules {
             Write-LogMessage -API 'Webhooks' -message 'Error Processing Audit logs' -LogData (Get-CippException -Exception $_) -sev Error -tenant $TenantFilter
             throw $_
         }
+
+        $AuditLogUserExclusions = Get-CIPPTable -TableName 'AuditLogUserExclusions'
+        $ExcludedUsers = Get-CIPPAzDataTableEntity @AuditLogUserExclusions -Filter "PartitionKey eq '$TenantFilter'"
 
         if ($LogCount -gt 0) {
             $LocationTable = Get-CIPPTable -TableName 'knownlocationdbv2'
@@ -343,6 +344,13 @@ function Test-CIPPAuditLogRules {
                         if ($condition.Property.label -eq 'CIPPGeoLocation' -and !$AddedLocationCondition) {
                             $conditionStrings.Add("`$_.HasLocationData -eq `$true")
                             $CIPPClause.Add('HasLocationData is true')
+                            $ExcludedUsers = $ExcludedUsers | Where-Object { $_.Type -eq 'Location' }
+                            # Build single -notin condition against all excluded user keys
+                            $ExcludedUserKeys = @($ExcludedUsers.RowKey)
+                            if ($ExcludedUserKeys.Count -gt 0) {
+                                $conditionStrings.Add("`$(`$_.CIPPUserKey) -notin @('$($ExcludedUserKeys -join "', '")')")
+                                $CIPPClause.Add("CIPPUserKey not in [$($ExcludedUserKeys -join ', ')]")
+                            }
                             $AddedLocationCondition = $true
                         }
                         $value = if ($condition.Input.value -is [array]) {
@@ -372,22 +380,26 @@ function Test-CIPPAuditLogRules {
 
             $MatchedRules = [System.Collections.Generic.List[string]]::new()
             $DataToProcess = foreach ($clause in $Where) {
-                $ClauseStartTime = Get-Date
-                Write-Warning "Webhook: Processing clause: $($clause.clause)"
-                $ReturnedData = $ProcessedData | Where-Object { Invoke-Expression $clause.clause }
-                if ($ReturnedData) {
-                    Write-Warning "Webhook: There is matching data: $(($ReturnedData.operation | Select-Object -Unique) -join ', ')"
-                    $ReturnedData = foreach ($item in $ReturnedData) {
-                        $item.CIPPAction = $clause.expectedAction
-                        $item.CIPPClause = $clause.CIPPClause -join ' and '
-                        $MatchedRules.Add($clause.CIPPClause -join ' and ')
-                        $item
+                try {
+                    $ClauseStartTime = Get-Date
+                    Write-Warning "Webhook: Processing clause: $($clause.clause)"
+                    $ReturnedData = $ProcessedData | Where-Object { Invoke-Expression $clause.clause }
+                    if ($ReturnedData) {
+                        Write-Warning "Webhook: There is matching data: $(($ReturnedData.operation | Select-Object -Unique) -join ', ')"
+                        $ReturnedData = foreach ($item in $ReturnedData) {
+                            $item.CIPPAction = $clause.expectedAction
+                            $item.CIPPClause = $clause.CIPPClause -join ' and '
+                            $MatchedRules.Add($clause.CIPPClause -join ' and ')
+                            $item
+                        }
                     }
+                    $ClauseEndTime = Get-Date
+                    $ClauseSeconds = ($ClauseEndTime - $ClauseStartTime).TotalSeconds
+                    Write-Warning "Task took $ClauseSeconds seconds for clause: $($clause.clause)"
+                    $ReturnedData
+                } catch {
+                    Write-Warning "Error processing clause: $($clause.clause): $($_.Exception.Message)"
                 }
-                $ClauseEndTime = Get-Date
-                $ClauseSeconds = ($ClauseEndTime - $ClauseStartTime).TotalSeconds
-                Write-Warning "Task took $ClauseSeconds seconds for clause: $($clause.clause)"
-                $ReturnedData
             }
             $Results.MatchedRules = @($MatchedRules | Select-Object -Unique)
             $Results.MatchedLogs = ($DataToProcess | Measure-Object).Count
